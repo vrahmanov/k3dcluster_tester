@@ -13,13 +13,39 @@ TRAEFIK_V2=Yes
 INSTALL_INGRESS=Yes
 INSTALL_DASHBOARD=No
 INSTALL_PROMETHEUS=Yes
-
+INSTALL_ARGOCD=Yes
+INSTALL_TEKTON=Yes
 # bold text 
 bold=$(tput bold)
 normal=$(tput sgr0)
 yes_no="(${bold}Y${normal}es/${bold}N${normal}o)"
 
 
+
+# countdown function
+function countdown
+{
+        local OLD_IFS="${IFS}"
+        IFS=":"
+        local ARR=( $1 )
+        local SECONDS=$((  (ARR[0] * 60 * 60) + (ARR[1] * 60) + ARR[2]  ))
+        local START=$(date +%s)
+        local END=$((START + SECONDS))
+        local CUR=$START
+
+        while [[ $CUR -lt $END ]]
+        do
+                CUR=$(date +%s)
+                LEFT=$((END-CUR))
+
+                printf "\r%02d:%02d:%02d" \
+                        $((LEFT/3600)) $(( (LEFT/60)%60)) $((LEFT%60))
+
+                sleep 1
+        done
+        IFS="${OLD_IFS}"
+        echo "        "
+}
 # $1 text to show - $2 default value
 read_value ()
 {
@@ -109,6 +135,17 @@ configValues ()
   HTTP_PORT=${READ_VALUE}
   read_value "LoadBalancer HTTPS Port" "${HTTPS_PORT}"
   HTTPS_PORT=${READ_VALUE}
+  read_value "Tekton" "${INSTALL_TEKTON}"
+  INSTALL_TEKTON=${READ_VALUE}
+  read_value "Argo" "${INSTALL_ARGOCD}"
+  INSTALL_ARGOCD=${READ_VALUE}
+  read_value "Ingress" "${INSTALL_INGRESS}"
+  INSTALL_INGRESS=${READ_VALUE}
+  
+    read_value "Dashboard" "${INSTALL_DASHBOARD}"
+  INSTALL_DASHBOARD=${READ_VALUE}
+      read_value "Prometheus" "${INSTALL_PROMETHEUS}"
+  INSTALL_PROMETHEUS=${READ_VALUE}
 }
 
 installCluster ()
@@ -281,6 +318,7 @@ EOF
 
 installDashboard ()
 {
+  
   header "Instaling Dashboard"
   # Install Kubernetes Dashboard
   kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.0.0/aio/deploy/recommended.yaml
@@ -306,42 +344,46 @@ installDashboard ()
   echo "http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/#/login"
   footer
 }
+installTekton()
+{
+  kubectl apply --filename https://storage.googleapis.com/tekton-releases/pipeline/latest/release.yaml
+  kubectl apply --filename https://storage.googleapis.com/tekton-releases/dashboard/latest/tekton-dashboard-release.yaml
+  addSubdomainEtc tekton
+  cat <<EOF | kubectl apply -f -
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tekton-server-http-ingress
+  namespace: tekton-pipelines
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: tekton-dashboard
+            port:
+              number: 9097
+    host: tekton.fuf.me
+  tls:
+  - hosts:
+    - tekton.fuf.me
+    # secretName: argocd-secret # do not change, this is provided by Argo CD
+EOF
+}
 installArogcd()
 {
   header "Instaling ArgoCd"
   kubectl create namespace argocd || printf "\n Namespace exists\n"
   kubectl create namespace guestbookex || printf "\n Namespace exists\n"
-  helm install argocd argo/argo-cd -f ./or.yml -n argocd #overide with insecure set
-  # kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml || printf "\n Stabel version deployed \n"
-#   cat <<EOF | kubectl apply -f -
-# apiVersion: networking.k8s.io/v1
-# kind: Ingress
-# metadata:
-#   name: argocd-ingress
-#   namespace: argocd
-#   annotations:
-#     nginx.ingress.kubernetes.io/rewrite-target: /
-#     nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
-# spec:
-#   ingressClassName: nginx
-#   tls:
-#   - hosts:
-#     - argocd.${CLUSTER_DOMAIN}
-#     # secretName: domain-com
-#   rules:
-#   - host: argocd.${CLUSTER_DOMAIN}
-#     http:
-#       paths:
-#       - path: /
-#         pathType: Prefix
-#         backend:
-#           service:
-#             name: argocd
-#             port:
-#               number: 8080
-# EOF
-
-
+  helm install argocd argo/argo-cd -f ./argo_insecure.yml -n argocd #overide with insecure set
   cat <<EOF | kubectl apply -f -
 
 apiVersion: networking.k8s.io/v1
@@ -466,38 +508,6 @@ spec:
         - containerPort: 80
 EOF
 
-#   cat <<EOF | kubectl apply -f -
-# apiVersion: networking.k8s.io/v1
-# kind: Ingress
-# metadata:
-#   name: monitoring
-#   namespace: monitoring
-#   annotations:
-#     ingress.kubernetes.io/ssl-redirect: "true"
-# spec:
-#   rules:
-#     - host: grafana.${CLUSTER_DOMAIN}
-#       http:
-#         paths:
-#           - path: /
-#             pathType: Prefix
-#             backend:
-#               service:
-#                 name: grafana
-#                 port:
-#                   number: 80
-
-#     - host: prometheus.${CLUSTER_DOMAIN}
-#       http:
-#         paths:
-#           - path: /
-#             pathType: Prefix
-#             backend:
-#               service:
-#                 name: prometheus-server
-#                 port:
-#                   number: 80
-# EOF
 
   header "Grafana and Prometheus Access:"
   echo "${bold}Prometheus${normal}:"
@@ -572,9 +582,11 @@ installAddons ()
 showurls ()
 {
     header "Local K3d cluster endpoints :"
+    countdown "00:00:15" 
     echo "Prometheus : https://prometheus.${CLUSTER_DOMAIN}"
     echo "Grafana: https://grafana.${CLUSTER_DOMAIN} user:admin pass:$(kubectl get secret --namespace monitoring grafana-admin -o jsonpath="{.data.GF_SECURITY_ADMIN_PASSWORD}" | base64 --decode ; echo)"
     echo "ArgoCD : https://argocd.${CLUSTER_DOMAIN} user:admin pass:$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)"
+    
     echo "Registry : http://${CLUSTER_DOMAIN}.registry:5000 user:${CLUSTER_DOMAIN} pass:${CLUSTER_DOMAIN}"
     echo "Registry : http://${CLUSTER_DOMAIN}.registry:5000 user:${CLUSTER_DOMAIN} pass:${CLUSTER_DOMAIN}"
 
@@ -596,33 +608,3 @@ installArogcd
 
 kubectl config set-context "k3d-${CLUSTER_NAME}"
 showurls
-
-
-
-
-
-
-
-# cat <<EOF | kubectl apply -f -
-# apiVersion: apps/v1
-# kind: Deployment
-# metadata:
-#   name: nginx-test-registry
-#   labels:
-#     app: nginx-test-registry
-# spec:
-#   replicas: 1
-#   selector:
-#     matchLabels:
-#       app: nginx-test-registry
-#   template:
-#     metadata:
-#       labels:
-#         app: nginx-test-registry
-#     spec:
-#       containers:
-#       - name: nginx-test-registry
-#         image: registry.localhost:50088/nginx:latest
-#         ports:
-#         - containerPort: 80
-# EOF
