@@ -1,5 +1,5 @@
 #!/bin/sh
-
+source manage_hosts.sh
 # Instalation variables
 CLUSTER_DOMAIN=fuf.me
 API_PORT=6443
@@ -23,7 +23,7 @@ yes_no="(${bold}Y${normal}es/${bold}N${normal}o)"
 
 
 # countdown function
-function countdown
+function countdown ()
 {
         local OLD_IFS="${IFS}"
         IFS=":"
@@ -168,7 +168,7 @@ kubeAPI:
   hostIP: "0.0.0.0"
   hostPort: "${API_PORT}" # kubernetes api port 6443:6443
 
-image: rancher/k3s:latest
+image: rancher/k3s:latest 
 #image: rancher/k3s:v1.19.4-k3s1
 
 volumes:
@@ -195,28 +195,6 @@ labels:
       - server[0] # 
       - loadbalancer
 
-# registries:
-#  create: true
-#  use: []
-#  config: |
-#    auth:
-#      username: registry.localhost
-#      password: registry.localhost
-#    mirrors:
-#      "registry.localhost":
-#        endpoint:
-#          - http://registry.localhost:5000
-
-registries:
-  create: true
-  use: []
-  config: |
-    mirrors:
-      "registry.localhost":
-        endpoint:
-          - http://registry.localhost:5000
-
-
 options:
   k3d:
     wait: true
@@ -235,17 +213,8 @@ options:
     switchCurrentContext: true # change this cluster context when cluster starts
 EOF
 
-  k3d cluster create --config tmp-k3d-${CLUSTER_NAME}.yaml
-
- #   k3d cluster create ${CLUSTER_NAME} \
- #   --api-port ${API_PORT} \
- #   --port ${HTTPS_PORT}:443@loadbalancer  \
- #   --port ${HTTP_PORT}:80@loadbalancer \
- #   --volume $(pwd)/k3dvol:/tmp/k3dvol \
- #   --servers ${SERVERS} \
- #   --agents ${AGENTS} \
- #   --volume "$(pwd)/deployments/helm-ingress-nginx.yaml:/var/lib/rancher/k3s/server/manifests/helm-ingress-nginx.yaml" \
- #   --k3s-server-arg '--no-deploy=traefik' 
+  k3d registry create reg.localhost --port 5111 # mapped to k3d-reg.localhost
+  k3d cluster create --config tmp-k3d-${CLUSTER_NAME}.yaml --registry-use k3d-reg.localhost:5111
 
   header "waiting for cluster init ..."
   sleep 5    
@@ -282,16 +251,17 @@ generateCert ()
   header "Installing Cert for ${CLUSTER_DOMAIN}"
   mkcert --install
   header "Adding 127.0.0.1 ${CLUSTER_DOMAIN} to your /etc/hosts "
-  sudo -- sh -c "echo 127.0.0.1 ${CLUSTER_DOMAIN} >> /etc/hosts"
+  #sudo -- sh -c "echo 127.0.0.1 ${CLUSTER_DOMAIN} >> /etc/hosts"
 }
 addSubdomainEtc ()
 {
   header "Adding 127.0.0.1 ${1}.${CLUSTER_DOMAIN} to your /etc/hosts "
-  sudo -- sh -c "echo 127.0.0.1 ${1}.${CLUSTER_DOMAIN} >> /etc/hosts"
-  header "Adding 127.0.0.1 ${CLUSTER_DOMAIN}.registry to your /etc/hosts "
-  sudo -- sh -c "echo 127.0.0.1 registry.localhost >> /etc/hosts"
-
+  #sudo -- sh -c "echo 127.0.0.1 ${1}.${CLUSTER_DOMAIN} >> /etc/hosts"
+  # header "Adding 127.0.0.1 ${CLUSTER_DOMAIN}.registry to your /etc/hosts"
   
+  addhost ${1}.${CLUSTER_DOMAIN}
+  #sudo -- sh -c "echo 127.0.0.1 registry.localhost >> /etc/hosts"
+
 }
 installIngress ()
 {
@@ -347,7 +317,8 @@ installDashboard ()
 installTekton()
 {
   kubectl apply --filename https://storage.googleapis.com/tekton-releases/pipeline/latest/release.yaml
-  kubectl apply --filename https://storage.googleapis.com/tekton-releases/dashboard/latest/tekton-dashboard-release.yaml
+kubectl apply --filename https://storage.googleapis.com/tekton-releases/dashboard/latest/release.yaml
+
   addSubdomainEtc tekton
   cat <<EOF | kubectl apply -f -
 
@@ -405,7 +376,7 @@ spec:
           service:
             name: argocd-server
             port:
-              name: http
+              number: 80
     host: argocd.fuf.me
   tls:
   - hosts:
@@ -582,14 +553,11 @@ installAddons ()
 showurls ()
 {
     header "Local K3d cluster endpoints :"
-    countdown "00:00:15" 
+    countdown "00:00:10" 
     echo "Prometheus : https://prometheus.${CLUSTER_DOMAIN}"
     echo "Grafana: https://grafana.${CLUSTER_DOMAIN} user:admin pass:$(kubectl get secret --namespace monitoring grafana-admin -o jsonpath="{.data.GF_SECURITY_ADMIN_PASSWORD}" | base64 --decode ; echo)"
     echo "ArgoCD : https://argocd.${CLUSTER_DOMAIN} user:admin pass:$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)"
-    
-    echo "Registry : http://${CLUSTER_DOMAIN}.registry:5000 user:${CLUSTER_DOMAIN} pass:${CLUSTER_DOMAIN}"
-    echo "Registry : http://${CLUSTER_DOMAIN}.registry:5000 user:${CLUSTER_DOMAIN} pass:${CLUSTER_DOMAIN}"
-
+    echo "Registry : http://localhost:5111 user:admin pass:admin"
 }
 
 # deployTekton()
@@ -598,6 +566,12 @@ showurls ()
 
 # }
 
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo add bitnami https://charts.bitnami.com/bitnami || header "Error adding bitnami "
+
+
+
+
 checkDependencies 
 #Retrieve config values 
 configValues
@@ -605,6 +579,30 @@ configValues
 installCluster
 installAddons
 installArogcd
-
 kubectl config set-context "k3d-${CLUSTER_NAME}"
 showurls
+
+
+header "Provisioning Sample App on Argo"
+argocd login argocd.${CLUSTER_DOMAIN} --password $(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d) --username admin
+
+
+
+   # Create a directory app
+    argocd app create guestbook --repo https://github.com/argoproj/argocd-example-apps.git --path guestbook --dest-namespace default --dest-server https://kubernetes.default.svc --directory-recurse
+
+    # Create a Jsonnet app
+    argocd app create jsonnet-guestbook --repo https://github.com/argoproj/argocd-example-apps.git --path jsonnet-guestbook --dest-namespace default --dest-server https://kubernetes.default.svc --jsonnet-ext-str replicas=2
+
+    # Create a Helm app
+    argocd app create helm-guestbook --repo https://github.com/argoproj/argocd-example-apps.git --path helm-guestbook --dest-namespace default --dest-server https://kubernetes.default.svc --helm-set replicaCount=2
+
+    # Create a Helm app from a Helm repo
+    argocd app create nginx-ingress --repo https://kubernetes-charts.storage.googleapis.com --helm-chart nginx-ingress --revision 1.24.3 --dest-namespace default --dest-server https://kubernetes.default.svc
+
+    # Create a Kustomize app
+    argocd app create kustomize-guestbook --repo https://github.com/argoproj/argocd-example-apps.git --path kustomize-guestbook --dest-namespace default --dest-server https://kubernetes.default.svc --kustomize-image gcr.io/heptio-images/ks-guestbook-demo:0.1
+
+    # Create a app using a custom tool:
+    argocd app create ksane --repo https://github.com/argoproj/argocd-example-apps.git --path plugins/kasane --dest-namespace default --dest-server https://kubernetes.default.svc --config-management-plugin kasane
+
