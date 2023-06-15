@@ -1,0 +1,13 @@
+deployment:
+  myapp:
+    image:
+      repository: k3d-reg.localhost:5111/myapp
+      tag: blue
+  replicas: 3
+kubernetesClusterDomain: cluster.local
+service:
+  ports:
+  - port: 8081
+    protocol: TCP
+    targetPort: 80
+  type: LoadBalancer
