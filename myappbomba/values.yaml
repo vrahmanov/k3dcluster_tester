@@ -11,4 +11,4 @@ service:
     - port: 8081
       protocol: TCP
       targetPort: 8082
-  type: LoadBalancer
+  type: ClusterIP
