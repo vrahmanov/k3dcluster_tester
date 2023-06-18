@@ -2,7 +2,7 @@ deployment:
   myapp:
     image:
       repository: k3d-reg.localhost:5111/myapp
-      tag: latest
+      tag: 0.3.0
   replicas: 10
 
 kubernetesClusterDomain: fuf.me
